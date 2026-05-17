@@ -14,7 +14,11 @@ describe('inspectProject', () => {
       join(projectRoot, 'src/api/http.ts'),
       [
         "import axios from 'axios';",
-        "export const http = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL });",
+        "export const http = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL, withCredentials: true });",
+        "http.interceptors.request.use((config) => {",
+        "  config.headers.Authorization = `Bearer ${localStorage.getItem('accessToken')}`;",
+        '  return config;',
+        '});',
       ].join('\n'),
     );
     await writeFile(
@@ -55,6 +59,23 @@ describe('inspectProject', () => {
         method: 'POST',
         source: 'src/api/user.ts#updateUserStatus',
         url: '/users/${id}/status',
+      },
+    ]);
+    expect(report.authClues).toEqual([
+      {
+        kind: 'authorization-header',
+        source: 'src/api/http.ts',
+        detail: 'mentions authorization header',
+      },
+      {
+        kind: 'credentials',
+        source: 'src/api/http.ts',
+        detail: 'mentions credentialed requests',
+      },
+      {
+        kind: 'token',
+        source: 'src/api/http.ts',
+        detail: 'mentions token state',
       },
     ]);
     expect(report.cardCandidates).toEqual([

@@ -1,5 +1,12 @@
 #!/usr/bin/env node
-import { inspectProject } from './index.js';
+import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { generateAdapter, inspectProject } from './index.js';
+
+const execFileAsync = promisify(execFile);
 
 type CliIo = {
   stdout: (text: string) => void;
@@ -14,12 +21,24 @@ const DEFAULT_IO: CliIo = {
 export async function runCli(args = process.argv.slice(2), io: CliIo = DEFAULT_IO): Promise<number> {
   const [command, ...rest] = args;
 
-  if (command !== 'inspect') {
-    io.stderr(helpText());
-    return 1;
+  if (command === 'inspect') {
+    return runInspect(rest, io);
   }
 
-  const options = parseInspectArgs(rest);
+  if (command === 'generate') {
+    return runGenerate(rest, io);
+  }
+
+  if (command === 'build') {
+    return runBuild(rest, io);
+  }
+
+  io.stderr(helpText());
+  return 1;
+}
+
+async function runInspect(args: string[], io: CliIo): Promise<number> {
+  const options = parseProjectArgs(args);
   if (!options.projectRoot) {
     io.stderr('Missing required --project <path> option.\n');
     return 1;
@@ -35,7 +54,44 @@ export async function runCli(args = process.argv.slice(2), io: CliIo = DEFAULT_I
   return 0;
 }
 
-function parseInspectArgs(args: string[]): { projectRoot?: string; json: boolean } {
+async function runGenerate(args: string[], io: CliIo): Promise<number> {
+  const options = parseProjectArgs(args);
+  if (!options.projectRoot) {
+    io.stderr('Missing required --project <path> option.\n');
+    return 1;
+  }
+
+  const result = await generateAdapter({ projectRoot: options.projectRoot });
+  if (options.json) {
+    io.stdout(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    io.stdout(`Generated adapter package at ${result.packageDir}\n`);
+  }
+
+  return 0;
+}
+
+async function runBuild(args: string[], io: CliIo): Promise<number> {
+  const options = parseProjectArgs(args);
+  if (!options.projectRoot) {
+    io.stderr('Missing required --project <path> option.\n');
+    return 1;
+  }
+
+  const result = await generateAdapter({ projectRoot: options.projectRoot });
+  await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: result.packageDir });
+  await execFileAsync('npm', ['run', 'build'], { cwd: result.packageDir });
+
+  if (options.json) {
+    io.stdout(`${JSON.stringify({ ...result, built: true }, null, 2)}\n`);
+  } else {
+    io.stdout(`Built adapter package at ${result.packageDir}\n`);
+  }
+
+  return 0;
+}
+
+function parseProjectArgs(args: string[]): { projectRoot?: string; json: boolean } {
   let projectRoot: string | undefined;
   let json = false;
 
@@ -52,6 +108,16 @@ function parseInspectArgs(args: string[]): { projectRoot?: string; json: boolean
   return { projectRoot, json };
 }
 
+function helpText(): string {
+  return [
+    'Usage:',
+    '  open-web inspect --project <path> [--json]',
+    '  open-web generate --project <path> [--json]',
+    '  open-web build --project <path> [--json]',
+    '',
+  ].join('\n');
+}
+
 function formatInspectReport(report: Awaited<ReturnType<typeof inspectProject>>): string {
   return [
     `Axios atoms: ${report.axiosAtoms.length}`,
@@ -62,11 +128,7 @@ function formatInspectReport(report: Awaited<ReturnType<typeof inspectProject>>)
   ].join('\n');
 }
 
-function helpText(): string {
-  return ['Usage:', '  open-web inspect --project <path> [--json]', ''].join('\n');
-}
-
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]))) {
   runCli().then((exitCode) => {
     process.exitCode = exitCode;
   });
