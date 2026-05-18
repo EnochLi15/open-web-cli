@@ -1,12 +1,8 @@
 #!/usr/bin/env node
-import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
-import { generateAdapter, inspectProject } from './index.js';
-
-const execFileAsync = promisify(execFile);
+import { buildAdapter, generateAdapter, inspectProject, type OpenWebDiagnostic, type OpenWebEvent, type OpenWebReporter } from './index.js';
 
 type CliIo = {
   stdout: (text: string) => void;
@@ -39,7 +35,10 @@ export async function runCli(args = process.argv.slice(2), io: CliIo = DEFAULT_I
 
 async function runInspect(args: string[], io: CliIo): Promise<number> {
   const options = parseProjectArgs(args);
-  const report = await inspectProject({ projectRoot: options.projectRoot });
+  const report = await inspectProject({
+    projectRoot: options.projectRoot,
+    reporter: options.json ? undefined : createCliReporter(io),
+  });
   if (options.json) {
     io.stdout(`${JSON.stringify(report, null, 2)}\n`);
   } else {
@@ -51,7 +50,11 @@ async function runInspect(args: string[], io: CliIo): Promise<number> {
 
 async function runGenerate(args: string[], io: CliIo): Promise<number> {
   const options = parseProjectArgs(args);
-  const result = await generateAdapter({ projectRoot: options.projectRoot, configPath: options.configPath });
+  const result = await generateAdapter({
+    projectRoot: options.projectRoot,
+    configPath: options.configPath,
+    reporter: options.json ? undefined : createCliReporter(io),
+  });
   if (options.json) {
     io.stdout(`${JSON.stringify(result, null, 2)}\n`);
   } else {
@@ -63,9 +66,11 @@ async function runGenerate(args: string[], io: CliIo): Promise<number> {
 
 async function runBuild(args: string[], io: CliIo): Promise<number> {
   const options = parseProjectArgs(args);
-  const result = await generateAdapter({ projectRoot: options.projectRoot, configPath: options.configPath });
-  await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: result.packageDir });
-  await execFileAsync('npm', ['run', 'build'], { cwd: result.packageDir });
+  const result = await buildAdapter({
+    projectRoot: options.projectRoot,
+    configPath: options.configPath,
+    reporter: options.json ? undefined : createCliReporter(io),
+  });
 
   if (options.json) {
     io.stdout(`${JSON.stringify({ ...result, built: true }, null, 2)}\n`);
@@ -74,6 +79,48 @@ async function runBuild(args: string[], io: CliIo): Promise<number> {
   }
 
   return 0;
+}
+
+function createCliReporter(io: CliIo): OpenWebReporter {
+  return {
+    event: (event) => {
+      const message = formatEvent(event);
+      if (message) {
+        io.stderr(`${message}\n`);
+      }
+    },
+    diagnostic: (diagnostic) => {
+      io.stderr(`${formatDiagnostic(diagnostic)}\n`);
+    },
+  };
+}
+
+function formatEvent(event: OpenWebEvent): string | undefined {
+  if (event.type === 'config:load') {
+    return `Loading config ${event.configPath}`;
+  }
+
+  if (event.type === 'inspect:start') {
+    return `Inspecting ${event.projectRoot}`;
+  }
+
+  if (event.type === 'generate:start') {
+    return `Generating adapter at ${event.packageDir}`;
+  }
+
+  if (event.type === 'build:command') {
+    return `Running ${event.command} ${event.args.join(' ')} in ${event.packageDir}`;
+  }
+
+  if (event.type === 'build:complete') {
+    return `Build completed at ${event.result.packageDir}`;
+  }
+
+  return undefined;
+}
+
+function formatDiagnostic(diagnostic: OpenWebDiagnostic): string {
+  return `[${diagnostic.severity}] ${diagnostic.code}: ${diagnostic.message}`;
 }
 
 function parseProjectArgs(args: string[]): { projectRoot: string; configPath?: string; json: boolean } {

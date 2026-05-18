@@ -98,6 +98,81 @@ npm test
 npm pack --dry-run
 ```
 
+## Programmatic API
+
+The primary integration path is library-first: export a map of existing axios/API functions and wrap it with `axios2cli`. The result can be used by a tiny CLI entry point without generating a second adapter project:
+
+```ts
+import { axios2cli } from 'open-web-cli';
+import { listKanbanCards, moveKanbanCard } from './src/api/kanban';
+
+export const cliMap = axios2cli({
+  'board.listCards': {
+    call: listKanbanCards,
+    description: 'List kanban cards',
+    ui: (cards) => ({
+      kind: 'card',
+      component: 'kanban-board-card',
+      props: { data: cards },
+    }),
+  },
+  'card.move': {
+    call: moveKanbanCard,
+    description: 'Move a kanban card',
+    args: (input) => {
+      const payload = input as { id: string; status: string };
+      return [payload.id, payload.status];
+    },
+  },
+});
+```
+
+```ts
+#!/usr/bin/env node
+import { runCliMap } from 'open-web-cli';
+import { cliMap } from './cli-map';
+
+runCliMap(cliMap).then((exitCode) => {
+  process.exitCode = exitCode;
+});
+```
+
+The installed CLI can then run capabilities directly:
+
+```bash
+web-agent board listCards --input '{"status":"ready"}'
+web-agent card move --input '{"id":"task-102","status":"done"}'
+```
+
+The scanner/generator APIs still exist for discovery and migration workflows. Use them when an agent, CI job, editor extension, or internal tool needs richer configuration, structured progress events, or direct access to generated results:
+
+```ts
+import { buildAdapter } from 'open-web-cli';
+
+const result = await buildAdapter({
+  projectRoot: process.cwd(),
+  configPath: 'open-web.config.ts',
+  reporter: {
+    event(event) {
+      console.error(event.type);
+    },
+    diagnostic(diagnostic) {
+      console.error(diagnostic.code, diagnostic.message);
+    },
+  },
+});
+
+console.log(result.packageDir);
+```
+
+The public API exposes both runtime wrapping and generator flows:
+
+```ts
+import { axios2cli, runCliMap, inspectProject, generateAdapter, buildAdapter } from 'open-web-cli';
+```
+
+Use `inspectProject` for discovery, `generateAdapter` when another system will install/build the adapter, and `buildAdapter` for the full local conversion.
+
 ## Commands
 
 ```bash

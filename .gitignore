@@ -3,3 +3,4 @@ node_modules/
 *.tsbuildinfo
 *.tgz
 examples/demo-agent-adapter/
+examples/demo-vue-axios/dist-agent/

@@ -3,9 +3,14 @@
   "version": "0.0.0",
   "type": "module",
   "private": true,
+  "bin": {
+    "demo-web-agent": "./dist-agent/cli.mjs"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
+    "agent:build": "vite build --config vite.agent.config.ts",
+    "agent:cli": "node dist-agent/cli.mjs",
     "open-web:inspect": "open-web inspect --json",
     "open-web:generate": "open-web generate",
     "open-web:build": "open-web build"
@@ -18,9 +23,10 @@
     "vite": "^6.0.5",
     "vue": "^3.5.13",
     "vue-router": "^5.0.7",
-    "vue-tsc": "^2.2.0"
+    "vue-tsc": "^2.2.0",
+    "open-web-cli": "file:../.."
   },
   "devDependencies": {
-    "open-web-cli": "file:../.."
+    "@types/node": "^25.8.0"
   }
 }

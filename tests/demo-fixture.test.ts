@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { generateAdapter, inspectProject } from '../src/index.js';
+import { buildAdapter, inspectProject } from '../src/index.js';
 
 const execFileAsync = promisify(execFile);
 const demoRoot = join(process.cwd(), 'examples/demo-vue-axios');
@@ -70,10 +70,26 @@ describe('demo Vue 3 axios fixture', () => {
       ]),
     );
 
-    const generated = await generateAdapter({ projectRoot: demoRoot });
+    const generated = await buildAdapter({ projectRoot: demoRoot, env: realNpmEnv });
     expect(generated.packageDir).toBe(join(process.cwd(), 'examples/demo-agent-adapter'));
+    expect(generated.built).toBe(true);
 
-    await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: generated.packageDir, env: realNpmEnv });
-    await execFileAsync('npm', ['run', 'build'], { cwd: generated.packageDir, env: realNpmEnv });
+    await execFileAsync('npm', ['run', 'agent:build'], { cwd: demoRoot, env: realNpmEnv });
+    const agentCli = await execFileAsync(
+      process.execPath,
+      ['dist-agent/cli.mjs', 'member', 'list'],
+      { cwd: demoRoot, env: realNpmEnv },
+    );
+    expect(JSON.parse(agentCli.stdout)).toEqual({
+      ok: true,
+      capability: 'member.list',
+      data: [
+        { id: 'm-1', name: 'Ava Chen', role: 'Product', avatar: 'AC' },
+        { id: 'm-2', name: 'Noah Park', role: 'Frontend', avatar: 'NP' },
+        { id: 'm-3', name: 'Mina Singh', role: 'Design', avatar: 'MS' },
+        { id: 'm-4', name: 'Leo Wang', role: 'Backend', avatar: 'LW' },
+      ],
+      summary: 'Found 4 members.',
+    });
   });
 });

@@ -1,11 +1,142 @@
+import { execFile } from 'node:child_process';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { createContext, Script } from 'node:vm';
+import { promisify } from 'node:util';
 import { parse as parseSfc } from '@vue/compiler-sfc';
 import ts from 'typescript';
 
+const execFileAsync = promisify(execFile);
+
+export type OpenWebDiagnostic = {
+  code: string;
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+  details?: unknown;
+};
+
+export type OpenWebEvent =
+  | {
+      type: 'inspect:start';
+      projectRoot: string;
+    }
+  | {
+      type: 'inspect:complete';
+      projectRoot: string;
+      report: InspectReport;
+    }
+  | {
+      type: 'config:load';
+      configPath: string;
+    }
+  | {
+      type: 'generate:start';
+      projectRoot: string;
+      packageDir: string;
+    }
+  | {
+      type: 'generate:file';
+      packageDir: string;
+      filePath: string;
+    }
+  | {
+      type: 'generate:complete';
+      result: GenerateAdapterResult;
+    }
+  | {
+      type: 'build:start';
+      packageDir: string;
+    }
+  | {
+      type: 'build:command';
+      packageDir: string;
+      command: string;
+      args: string[];
+    }
+  | {
+      type: 'build:complete';
+      result: BuildAdapterResult;
+    };
+
+export type OpenWebReporter = {
+  event?: (event: OpenWebEvent) => void;
+  diagnostic?: (diagnostic: OpenWebDiagnostic) => void;
+};
+
+export type OpenWebUiPayload = {
+  kind: 'card' | 'table' | 'form' | 'panel' | 'custom';
+  component: string;
+  props: Record<string, unknown>;
+  actions?: Array<Record<string, unknown>>;
+};
+
+export type OpenWebSuccess<TData = unknown> = {
+  ok: true;
+  capability: string;
+  data: TData;
+  summary?: string;
+  ui?: OpenWebUiPayload;
+};
+
+export type OpenWebFailure = {
+  ok: false;
+  error: {
+    code:
+      | 'AUTH_REQUIRED'
+      | 'AUTH_EXPIRED'
+      | 'PERMISSION_DENIED'
+      | 'VALIDATION_ERROR'
+      | 'REMOTE_HTTP_ERROR'
+      | 'REMOTE_BUSINESS_ERROR'
+      | 'NETWORK_ERROR'
+      | 'CAPABILITY_NOT_FOUND'
+      | 'UI_RENDER_UNAVAILABLE'
+      | 'CONFIG_ERROR'
+      | 'UNKNOWN_ERROR';
+    message: string;
+    recoverable?: boolean;
+    details?: unknown;
+  };
+};
+
+export type OpenWebResult<TData = unknown> = OpenWebSuccess<TData> | OpenWebFailure;
+
+export type CliIo = {
+  stdout: (text: string) => void;
+  stderr: (text: string) => void;
+};
+
+export type CliExecutionContext = {
+  capability: string;
+  argv: string[];
+  env: NodeJS.ProcessEnv;
+};
+
+export type AxiosCliCallable = (...args: any[]) => Promise<unknown> | unknown;
+
+export type AxiosCliDefinition<TInput = unknown, TData = unknown> = {
+  call: AxiosCliCallable;
+  description?: string;
+  args?: (input: TInput, context: CliExecutionContext) => unknown[];
+  summary?: (data: TData, input: TInput) => string | undefined;
+  ui?:
+    | OpenWebUiPayload
+    | ((data: TData, input: TInput) => OpenWebUiPayload | undefined);
+};
+
+export type AxiosCliMapInput = Record<string, AxiosCliCallable | AxiosCliDefinition>;
+
+export type CliMapEntry = {
+  id: string;
+  description?: string;
+  execute: (input: unknown, context: CliExecutionContext) => Promise<OpenWebResult>;
+};
+
+export type CliMap = Record<string, CliMapEntry>;
+
 export type InspectProjectOptions = {
   projectRoot: string;
+  reporter?: OpenWebReporter;
 };
 
 export type OpenWebConfig = {
@@ -64,11 +195,22 @@ export type InspectReport = {
 export type GenerateAdapterOptions = {
   projectRoot: string;
   configPath?: string;
+  reporter?: OpenWebReporter;
 };
 
 export type GenerateAdapterResult = {
   packageDir: string;
   files: string[];
+};
+
+export type BuildAdapterOptions = GenerateAdapterOptions & {
+  install?: boolean;
+  packageManager?: string;
+  env?: NodeJS.ProcessEnv;
+};
+
+export type BuildAdapterResult = GenerateAdapterResult & {
+  built: true;
 };
 
 export function defineOpenWeb<const TConfig extends OpenWebConfig>(config: TConfig): TConfig {
@@ -77,9 +219,218 @@ export function defineOpenWeb<const TConfig extends OpenWebConfig>(config: TConf
 
 const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx']);
+const DEFAULT_CLI_IO: CliIo = {
+  stdout: (text) => process.stdout.write(text),
+  stderr: (text) => process.stderr.write(text),
+};
+
+function reportEvent(reporter: OpenWebReporter | undefined, event: OpenWebEvent): void {
+  reporter?.event?.(event);
+}
+
+function reportDiagnostic(reporter: OpenWebReporter | undefined, diagnostic: OpenWebDiagnostic): void {
+  reporter?.diagnostic?.(diagnostic);
+}
+
+export function axios2cli(definitions: AxiosCliMapInput): CliMap {
+  return Object.fromEntries(
+    Object.entries(definitions).map(([id, definition]) => {
+      const normalized = normalizeAxiosCliDefinition(definition);
+      return [
+        id,
+        {
+          id,
+          description: normalized.description,
+          execute: async (input: unknown, context: CliExecutionContext): Promise<OpenWebResult> => {
+            try {
+              const args = normalized.args ? normalized.args(input, context) : [input];
+              const response = await normalized.call(...args);
+              const data = unwrapAxiosData(response);
+              const result: OpenWebSuccess = {
+                ok: true,
+                capability: id,
+                data,
+                summary: normalized.summary?.(data, input),
+              };
+              const ui = typeof normalized.ui === 'function' ? normalized.ui(data, input) : normalized.ui;
+              if (ui) {
+                result.ui = ui;
+              }
+              return result;
+            } catch (error) {
+              return normalizeCliError(error);
+            }
+          },
+        },
+      ];
+    }),
+  );
+}
+
+export async function runCliMap(
+  cliMap: CliMap,
+  args = process.argv.slice(2),
+  io: CliIo = DEFAULT_CLI_IO,
+): Promise<number> {
+  const [resourceOrCommand, actionOrFlag, ...rest] = args;
+
+  if (!resourceOrCommand || resourceOrCommand === 'help' || resourceOrCommand === '--help') {
+    io.stdout(formatCliMapHelp(cliMap));
+    return 0;
+  }
+
+  if (resourceOrCommand === 'list') {
+    io.stdout(`${JSON.stringify(Object.values(cliMap).map(({ id, description }) => ({ id, description })), null, 2)}\n`);
+    return 0;
+  }
+
+  const action = actionOrFlag?.startsWith('--') ? undefined : actionOrFlag;
+  const flags = parseCliMapFlags(action ? rest : args.slice(1));
+  const capability = action ? `${resourceOrCommand}.${action}` : resourceOrCommand;
+  const entry = cliMap[capability];
+
+  if (!entry) {
+    writeCliMapJson(io, {
+      ok: false,
+      error: {
+        code: 'CAPABILITY_NOT_FOUND',
+        message: `Unknown capability: ${capability}`,
+        recoverable: false,
+      },
+    } satisfies OpenWebFailure);
+    return 1;
+  }
+
+  let input: unknown = {};
+  try {
+    input = flags.has('input') ? JSON.parse(flags.get('input') ?? '{}') : {};
+  } catch (error) {
+    writeCliMapJson(io, {
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      },
+    } satisfies OpenWebFailure);
+    return 1;
+  }
+
+  const result = await entry.execute(input, {
+    capability,
+    argv: args,
+    env: process.env,
+  });
+  writeCliMapJson(io, result);
+  return result.ok ? 0 : 1;
+}
+
+function normalizeAxiosCliDefinition(definition: AxiosCliCallable | AxiosCliDefinition): AxiosCliDefinition {
+  return typeof definition === 'function' ? { call: definition } : definition;
+}
+
+function unwrapAxiosData(response: unknown): unknown {
+  if (
+    typeof response === 'object' &&
+    response !== null &&
+    'data' in response &&
+    'status' in response &&
+    typeof (response as { status: unknown }).status === 'number'
+  ) {
+    return (response as { data: unknown }).data;
+  }
+
+  return response;
+}
+
+function normalizeCliError(error: unknown): OpenWebFailure {
+  if (isAxiosLikeError(error)) {
+    if (error.response) {
+      return {
+        ok: false,
+        error: {
+          code: 'REMOTE_HTTP_ERROR',
+          message: `HTTP ${error.response.status}`,
+          recoverable: error.response.status >= 500,
+          details: error.response.data,
+        },
+      };
+    }
+
+    return {
+      ok: false,
+      error: {
+        code: 'NETWORK_ERROR',
+        message: error.message,
+        recoverable: true,
+        details: error.code ? { code: error.code } : undefined,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    error: {
+      code: 'UNKNOWN_ERROR',
+      message: error instanceof Error ? error.message : String(error),
+      recoverable: false,
+    },
+  };
+}
+
+function isAxiosLikeError(error: unknown): error is {
+  isAxiosError?: boolean;
+  message: string;
+  code?: string;
+  response?: {
+    status: number;
+    data?: unknown;
+  };
+} {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    ((error as { isAxiosError?: unknown }).isAxiosError === true || 'response' in error || 'code' in error)
+  );
+}
+
+function parseCliMapFlags(args: string[]): Map<string, string | undefined> {
+  const flags = new Map<string, string | undefined>();
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg.startsWith('--')) {
+      const name = arg.slice(2);
+      const value = args[index + 1]?.startsWith('--') ? undefined : args[index + 1];
+      flags.set(name, value);
+      if (value !== undefined) {
+        index += 1;
+      }
+    }
+  }
+  return flags;
+}
+
+function writeCliMapJson(io: CliIo, value: unknown): void {
+  io.stdout(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function formatCliMapHelp(cliMap: CliMap): string {
+  return [
+    'Usage:',
+    '  web-agent list',
+    '  web-agent <resource> <action> [--input <json>]',
+    '',
+    'Capabilities:',
+    ...Object.values(cliMap).map((entry) => `  ${entry.id}${entry.description ? ` - ${entry.description}` : ''}`),
+    '',
+  ].join('\n');
+}
 
 export async function inspectProject(options: InspectProjectOptions): Promise<InspectReport> {
-  const files = await listProjectFiles(options.projectRoot);
+  const projectRoot = resolve(options.projectRoot);
+  reportEvent(options.reporter, { type: 'inspect:start', projectRoot });
+  const files = await listProjectFiles(projectRoot);
   const axiosAtoms: AxiosAtom[] = [];
   const authClues: AuthClue[] = [];
   const cardCandidates: CardCandidate[] = [];
@@ -88,39 +439,91 @@ export async function inspectProject(options: InspectProjectOptions): Promise<In
     const extension = extname(filePath);
     if (SOURCE_EXTENSIONS.has(extension)) {
       const sourceText = await readFile(filePath, 'utf8');
-      axiosAtoms.push(...findAxiosAtoms(options.projectRoot, filePath, sourceText));
-      authClues.push(...findAuthClues(options.projectRoot, filePath, sourceText));
+      axiosAtoms.push(...findAxiosAtoms(projectRoot, filePath, sourceText));
+      authClues.push(...findAuthClues(projectRoot, filePath, sourceText));
     }
 
     if (extension === '.vue') {
       const sourceText = await readFile(filePath, 'utf8');
-      authClues.push(...findAuthClues(options.projectRoot, filePath, sourceText));
-      cardCandidates.push(findCardCandidate(options.projectRoot, filePath, sourceText));
+      authClues.push(...findAuthClues(projectRoot, filePath, sourceText));
+      cardCandidates.push(findCardCandidate(projectRoot, filePath, sourceText));
     }
   }
 
-  return {
+  const report = {
     axiosAtoms: axiosAtoms.sort((left, right) => left.source.localeCompare(right.source)),
     authClues: authClues.sort((left, right) => left.source.localeCompare(right.source) || left.kind.localeCompare(right.kind)),
     cardCandidates: cardCandidates.sort((left, right) => left.source.localeCompare(right.source)),
   };
+
+  reportDiagnostic(options.reporter, {
+    code: 'INSPECT_SUMMARY',
+    severity: 'info',
+    message: `Found ${report.axiosAtoms.length} axios atoms and ${report.cardCandidates.length} card candidates.`,
+    details: {
+      axiosAtoms: report.axiosAtoms.length,
+      authClues: report.authClues.length,
+      cardCandidates: report.cardCandidates.length,
+    },
+  });
+  reportEvent(options.reporter, { type: 'inspect:complete', projectRoot, report });
+  return report;
 }
 
 export async function generateAdapter(options: GenerateAdapterOptions): Promise<GenerateAdapterResult> {
-  const config = await loadOpenWebConfig(options.configPath ?? join(options.projectRoot, 'open-web.config.ts'));
-  const report = await inspectProject({ projectRoot: options.projectRoot });
-  const packageDir = resolve(options.projectRoot, config.output.packageDir);
+  const projectRoot = resolve(options.projectRoot);
+  const configPath = options.configPath ?? join(projectRoot, 'open-web.config.ts');
+  reportEvent(options.reporter, { type: 'config:load', configPath });
+  const config = await loadOpenWebConfig(configPath);
+  const report = await inspectProject({ projectRoot, reporter: options.reporter });
+  const packageDir = resolve(projectRoot, config.output.packageDir);
+  reportEvent(options.reporter, { type: 'generate:start', projectRoot, packageDir });
   const manifest = buildAdapterManifest(config, report);
   const files = buildAdapterFiles(config, manifest);
 
   for (const [filePath, content] of files) {
     await writeGeneratedFile(packageDir, filePath, content);
+    reportEvent(options.reporter, { type: 'generate:file', packageDir, filePath });
   }
 
-  return {
+  const result = {
     packageDir,
     files: files.map(([filePath]) => filePath),
   };
+  reportEvent(options.reporter, { type: 'generate:complete', result });
+  return result;
+}
+
+export async function buildAdapter(options: BuildAdapterOptions): Promise<BuildAdapterResult> {
+  const generated = await generateAdapter(options);
+  const packageManager = options.packageManager ?? 'npm';
+  const env = { ...process.env, npm_config_dry_run: 'false', ...options.env };
+
+  reportEvent(options.reporter, { type: 'build:start', packageDir: generated.packageDir });
+
+  if (options.install !== false) {
+    const installArgs = ['install', '--ignore-scripts'];
+    reportEvent(options.reporter, {
+      type: 'build:command',
+      packageDir: generated.packageDir,
+      command: packageManager,
+      args: installArgs,
+    });
+    await execFileAsync(packageManager, installArgs, { cwd: generated.packageDir, env });
+  }
+
+  const buildArgs = ['run', 'build'];
+  reportEvent(options.reporter, {
+    type: 'build:command',
+    packageDir: generated.packageDir,
+    command: packageManager,
+    args: buildArgs,
+  });
+  await execFileAsync(packageManager, buildArgs, { cwd: generated.packageDir, env });
+
+  const result = { ...generated, built: true as const };
+  reportEvent(options.reporter, { type: 'build:complete', result });
+  return result;
 }
 
 async function loadOpenWebConfig(configPath: string): Promise<OpenWebConfig> {

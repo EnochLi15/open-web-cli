@@ -4,13 +4,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { generateAdapter } from '../src/index.js';
+import { buildAdapter } from '../src/index.js';
 
 const execFileAsync = promisify(execFile);
-const realNpmEnv = { ...process.env, npm_config_dry_run: 'false' };
 
-describe('generateAdapter', () => {
-  it('creates an independent adapter package with CLI, SDK, Mastra, stream, and Vue registry entry points', async () => {
+describe('buildAdapter', () => {
+  it('creates and builds an independent adapter package with CLI, SDK, Mastra, stream, and Vue registry entry points', async () => {
     const workspace = join(tmpdir(), `open-web-generate-${crypto.randomUUID()}`);
     const projectRoot = join(workspace, 'demo-web');
     const packageDir = join(workspace, 'demo-agent-adapter');
@@ -65,9 +64,18 @@ describe('generateAdapter', () => {
       ].join('\n'),
     );
 
-    const result = await generateAdapter({ projectRoot });
+    const events: string[] = [];
+    const diagnostics: string[] = [];
+    const result = await buildAdapter({
+      projectRoot,
+      reporter: {
+        event: (event) => events.push(event.type),
+        diagnostic: (diagnostic) => diagnostics.push(diagnostic.code),
+      },
+    });
 
     expect(result.packageDir).toBe(packageDir);
+    expect(result.built).toBe(true);
     expect(result.files).toEqual(
       expect.arrayContaining([
         'package.json',
@@ -83,9 +91,20 @@ describe('generateAdapter', () => {
         'src/runtime/stream.ts',
       ]),
     );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        'config:load',
+        'inspect:start',
+        'inspect:complete',
+        'generate:start',
+        'generate:complete',
+        'build:start',
+        'build:command',
+        'build:complete',
+      ]),
+    );
+    expect(diagnostics).toEqual(expect.arrayContaining(['INSPECT_SUMMARY']));
 
-    await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: packageDir, env: realNpmEnv });
-    await execFileAsync('npm', ['run', 'build'], { cwd: packageDir, env: realNpmEnv });
     const cliSource = await readFile(join(packageDir, 'src/cli.ts'), 'utf8');
     const sdkSource = await readFile(join(packageDir, 'src/sdk.ts'), 'utf8');
 
