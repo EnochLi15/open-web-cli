@@ -7,28 +7,36 @@ export default defineOpenWeb({
   },
   auth: {
     loginUrl: 'https://app.example.test/login',
-    probeCapability: 'user.list',
+    probeCapability: 'board.listCards',
   },
   expose: {
     capabilities: {
-      'user.list': {
-        from: 'src/api/user.ts#listUsers',
-        description: 'List users',
+      'board.listCards': {
+        from: 'src/api/kanban.ts#listKanbanCards',
+        description: 'List kanban cards',
       },
-      'order.updateStatus': {
-        from: 'src/api/order.ts#updateOrderStatus',
-        description: 'Update an order status',
+      'card.create': {
+        from: 'src/api/kanban.ts#createKanbanCard',
+        description: 'Create a kanban card',
+      },
+      'card.move': {
+        from: 'src/api/kanban.ts#moveKanbanCard',
+        description: 'Move a kanban card to another status',
+      },
+      'member.list': {
+        from: 'src/api/kanban.ts#listKanbanMembers',
+        description: 'List board members',
       },
     },
   },
   cards: {
-    'user-list-card': {
-      source: 'src/components/UserListCard.vue',
-      capability: 'user.list',
+    'kanban-board-card': {
+      source: 'src/components/KanbanBoardCard.vue',
+      capability: 'board.listCards',
     },
-    'order-status-card': {
-      source: 'src/components/OrderStatusCard.vue',
-      capability: 'order.updateStatus',
+    'task-detail-card': {
+      source: 'src/components/TaskDetailCard.vue',
+      capability: 'card.move',
     },
   },
 });

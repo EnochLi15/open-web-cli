@@ -1,0 +1,293 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1180px;
+  color: #1f2937;
+  background: #eef2f6;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(680px, 1fr) 320px;
+  min-height: 100vh;
+}
+
+.workspace-sidebar,
+.detail-panel {
+  min-height: 100vh;
+  padding: 20px;
+  background: #ffffff;
+  border-right: 1px solid #d7dee8;
+}
+
+.detail-panel {
+  border-right: 0;
+  border-left: 1px solid #d7dee8;
+}
+
+.brand-block {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  color: #ffffff;
+  font-weight: 800;
+  background: #0f766e;
+  border-radius: 8px;
+}
+
+.brand-block strong,
+.brand-block span {
+  display: block;
+}
+
+.brand-block span,
+.member-row span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.login-card {
+  display: grid;
+  gap: 4px;
+}
+
+.login-status,
+.panel-title,
+.section-title,
+.lane-header,
+.task-card-header,
+.detail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-section {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.section-title,
+.panel-title {
+  justify-content: flex-start;
+  color: #334155;
+  font-weight: 700;
+}
+
+.compact-stats {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.compact-stats div {
+  padding: 12px;
+  color: #64748b;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.compact-stats span {
+  display: block;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.board-surface {
+  min-width: 0;
+  padding: 24px;
+}
+
+.board-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: 30px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.kanban-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(210px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.lane-column {
+  min-height: 640px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+}
+
+.lane-header {
+  margin-bottom: 12px;
+}
+
+.lane-header > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lane-dot {
+  width: 10px;
+  height: 10px;
+  background: #64748b;
+  border-radius: 999px;
+}
+
+.lane-column[data-tone="blue"] .lane-dot {
+  background: #2563eb;
+}
+
+.lane-column[data-tone="amber"] .lane-dot {
+  background: #d97706;
+}
+
+.lane-column[data-tone="violet"] .lane-dot {
+  background: #7c3aed;
+}
+
+.lane-column[data-tone="green"] .lane-dot {
+  background: #16a34a;
+}
+
+.lane-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.task-card {
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.task-card h3,
+.detail-card h2 {
+  margin: 12px 0 8px;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.task-card p,
+.detail-card p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.task-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.detail-card {
+  margin-top: 12px;
+  border-radius: 8px;
+}
+
+.detail-heading span {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.detail-card dl {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0 0;
+}
+
+.detail-card dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.detail-card dt {
+  color: #64748b;
+}
+
+.detail-card dd {
+  margin: 0;
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.member-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.member-row strong {
+  display: block;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}

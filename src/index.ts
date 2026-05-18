@@ -810,7 +810,11 @@ function collectAtomsFromFunction(
 }
 
 function getHttpCall(node: ts.Node): { method: string; url: string } | undefined {
-  if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
+  if (
+    !ts.isCallExpression(node) ||
+    !ts.isPropertyAccessExpression(node.expression) ||
+    !ts.isIdentifier(node.expression.expression)
+  ) {
     return undefined;
   }
 

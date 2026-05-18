@@ -14,16 +14,22 @@ describe('demo Vue 3 axios fixture', () => {
     expect(report.axiosAtoms).toEqual(
       expect.arrayContaining([
         {
-          id: 'user.listUsers',
+          id: 'kanban.listKanbanCards',
           method: 'GET',
-          source: 'src/api/user.ts#listUsers',
-          url: '/users',
+          source: 'src/api/kanban.ts#listKanbanCards',
+          url: '/kanban/cards',
         },
         {
-          id: 'order.updateOrderStatus',
+          id: 'kanban.createKanbanCard',
           method: 'POST',
-          source: 'src/api/order.ts#updateOrderStatus',
-          url: '/orders/${id}/status',
+          source: 'src/api/kanban.ts#createKanbanCard',
+          url: '/kanban/cards',
+        },
+        {
+          id: 'kanban.moveKanbanCard',
+          method: 'PATCH',
+          source: 'src/api/kanban.ts#moveKanbanCard',
+          url: '/kanban/cards/${id}/status',
         },
       ]),
     );
@@ -49,15 +55,15 @@ describe('demo Vue 3 axios fixture', () => {
     expect(report.cardCandidates).toEqual(
       expect.arrayContaining([
         {
-          id: 'user-list-card',
-          source: 'src/components/UserListCard.vue',
-          props: ['users'],
+          id: 'kanban-board-card',
+          source: 'src/components/KanbanBoardCard.vue',
+          props: ['lanes', 'members', 'tasks'],
           warnings: [],
         },
         {
-          id: 'order-status-card',
-          source: 'src/components/OrderStatusCard.vue',
-          props: ['orderId', 'status'],
+          id: 'task-detail-card',
+          source: 'src/components/TaskDetailCard.vue',
+          props: ['assignee', 'task'],
           warnings: [],
         },
       ]),
