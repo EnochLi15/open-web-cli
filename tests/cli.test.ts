@@ -39,6 +39,43 @@ describe('open-web inspect', () => {
       cardCandidates: [],
     });
   });
+
+  it('uses the current working directory when --project is omitted', async () => {
+    const projectRoot = join(tmpdir(), `open-web-cli-cwd-${crypto.randomUUID()}`);
+    await mkdir(join(projectRoot, 'src/api'), { recursive: true });
+
+    await writeFile(
+      join(projectRoot, 'src/api/tasks.ts'),
+      [
+        "import axios from 'axios';",
+        'export async function listTasks() {',
+        "  return axios.get('/tasks');",
+        '}',
+      ].join('\n'),
+    );
+
+    const previousCwd = process.cwd();
+    process.chdir(projectRoot);
+    try {
+      const writes: string[] = [];
+      const exitCode = await runCli(['inspect', '--json'], {
+        stdout: (text) => writes.push(text),
+        stderr: () => undefined,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(writes.join('')).axiosAtoms).toEqual([
+        {
+          id: 'tasks.listTasks',
+          method: 'GET',
+          source: 'src/api/tasks.ts#listTasks',
+          url: '/tasks',
+        },
+      ]);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
 });
 
 describe('open-web generate', () => {
@@ -80,6 +117,41 @@ describe('open-web generate', () => {
     expect(JSON.parse(writes.join(''))).toEqual({
       packageDir: join(workspace, 'demo-agent-adapter'),
       files: expect.arrayContaining(['package.json', 'src/sdk.ts', 'src/cli.ts']),
+    });
+  });
+
+  it('resolves --config from the project directory', async () => {
+    const workspace = join(tmpdir(), `open-web-cli-config-${crypto.randomUUID()}`);
+    const projectRoot = join(workspace, 'demo-web');
+    await mkdir(join(projectRoot, 'src/api'), { recursive: true });
+
+    await writeFile(
+      join(projectRoot, 'agent.config.ts'),
+      [
+        "import { defineOpenWeb } from 'open-web-cli';",
+        'export default defineOpenWeb({',
+        "  output: { packageDir: '../configured-agent-adapter', packageName: '@demo/configured-agent-adapter' },",
+        "  expose: { capabilities: { 'task.list': { from: 'src/api/tasks.ts#listTasks' } } },",
+        '});',
+      ].join('\n'),
+    );
+    await writeFile(
+      join(projectRoot, 'src/api/tasks.ts'),
+      ["import axios from 'axios';", 'export function listTasks() {', "  return axios.get('/tasks');", '}'].join(
+        '\n',
+      ),
+    );
+
+    const writes: string[] = [];
+    const exitCode = await runCli(['generate', '--project', projectRoot, '--config', 'agent.config.ts', '--json'], {
+      stdout: (text) => writes.push(text),
+      stderr: () => undefined,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(writes.join(''))).toEqual({
+      packageDir: join(workspace, 'configured-agent-adapter'),
+      files: expect.arrayContaining(['package.json', 'src/manifest.ts']),
     });
   });
 });

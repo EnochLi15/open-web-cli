@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { generateAdapter } from '../src/index.js';
 
 const execFileAsync = promisify(execFile);
+const realNpmEnv = { ...process.env, npm_config_dry_run: 'false' };
 
 describe('generateAdapter', () => {
   it('creates an independent adapter package with CLI, SDK, Mastra, stream, and Vue registry entry points', async () => {
@@ -83,8 +84,8 @@ describe('generateAdapter', () => {
       ]),
     );
 
-    await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: packageDir });
-    await execFileAsync('npm', ['run', 'build'], { cwd: packageDir });
+    await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: packageDir, env: realNpmEnv });
+    await execFileAsync('npm', ['run', 'build'], { cwd: packageDir, env: realNpmEnv });
     const cliSource = await readFile(join(packageDir, 'src/cli.ts'), 'utf8');
     const sdkSource = await readFile(join(packageDir, 'src/sdk.ts'), 'utf8');
 

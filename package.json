@@ -1,21 +1,51 @@
 {
   "name": "open-web-cli",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Generate agent-ready CLI, SDK, Mastra, and Vue adapters from Vue 3 + axios applications.",
   "type": "module",
-  "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/EnochLi15/open-web-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EnochLi15/open-web-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/EnochLi15/open-web-cli/issues"
+  },
+  "keywords": [
+    "agent",
+    "cli",
+    "vue",
+    "axios",
+    "mastra",
+    "generative-ui"
+  ],
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
+    },
+    "./package.json": {
+      "default": "./package.json"
     }
   },
   "types": "./dist/src/index.d.ts",
   "bin": {
-    "open-web": "./dist/src/cli.js"
+    "open-web": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "docs/assets/hero.png"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test && npm run build",
+    "test": "vitest run --no-file-parallelism",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

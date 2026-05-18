@@ -39,11 +39,6 @@ export async function runCli(args = process.argv.slice(2), io: CliIo = DEFAULT_I
 
 async function runInspect(args: string[], io: CliIo): Promise<number> {
   const options = parseProjectArgs(args);
-  if (!options.projectRoot) {
-    io.stderr('Missing required --project <path> option.\n');
-    return 1;
-  }
-
   const report = await inspectProject({ projectRoot: options.projectRoot });
   if (options.json) {
     io.stdout(`${JSON.stringify(report, null, 2)}\n`);
@@ -56,12 +51,7 @@ async function runInspect(args: string[], io: CliIo): Promise<number> {
 
 async function runGenerate(args: string[], io: CliIo): Promise<number> {
   const options = parseProjectArgs(args);
-  if (!options.projectRoot) {
-    io.stderr('Missing required --project <path> option.\n');
-    return 1;
-  }
-
-  const result = await generateAdapter({ projectRoot: options.projectRoot });
+  const result = await generateAdapter({ projectRoot: options.projectRoot, configPath: options.configPath });
   if (options.json) {
     io.stdout(`${JSON.stringify(result, null, 2)}\n`);
   } else {
@@ -73,12 +63,7 @@ async function runGenerate(args: string[], io: CliIo): Promise<number> {
 
 async function runBuild(args: string[], io: CliIo): Promise<number> {
   const options = parseProjectArgs(args);
-  if (!options.projectRoot) {
-    io.stderr('Missing required --project <path> option.\n');
-    return 1;
-  }
-
-  const result = await generateAdapter({ projectRoot: options.projectRoot });
+  const result = await generateAdapter({ projectRoot: options.projectRoot, configPath: options.configPath });
   await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: result.packageDir });
   await execFileAsync('npm', ['run', 'build'], { cwd: result.packageDir });
 
@@ -91,29 +76,41 @@ async function runBuild(args: string[], io: CliIo): Promise<number> {
   return 0;
 }
 
-function parseProjectArgs(args: string[]): { projectRoot?: string; json: boolean } {
-  let projectRoot: string | undefined;
+function parseProjectArgs(args: string[]): { projectRoot: string; configPath?: string; json: boolean } {
+  let projectRoot = process.cwd();
+  let configPath: string | undefined;
   let json = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === '--project') {
-      projectRoot = args[index + 1];
+      projectRoot = resolve(args[index + 1] ?? process.cwd());
+      index += 1;
+    } else if (arg === '--config') {
+      configPath = args[index + 1];
       index += 1;
     } else if (arg === '--json') {
       json = true;
     }
   }
 
-  return { projectRoot, json };
+  if (configPath) {
+    configPath = resolve(projectRoot, configPath);
+  }
+
+  return { projectRoot, configPath, json };
 }
 
 function helpText(): string {
   return [
     'Usage:',
-    '  open-web inspect --project <path> [--json]',
-    '  open-web generate --project <path> [--json]',
-    '  open-web build --project <path> [--json]',
+    '  open-web inspect [--project <path>] [--json]',
+    '  open-web generate [--project <path>] [--config <path>] [--json]',
+    '  open-web build [--project <path>] [--config <path>] [--json]',
+    '',
+    'Defaults:',
+    '  --project defaults to the current working directory.',
+    '  --config is resolved from the project directory.',
     '',
   ].join('\n');
 }

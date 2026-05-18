@@ -6,6 +6,7 @@ import { generateAdapter, inspectProject } from '../src/index.js';
 
 const execFileAsync = promisify(execFile);
 const demoRoot = join(process.cwd(), 'examples/demo-vue-axios');
+const realNpmEnv = { ...process.env, npm_config_dry_run: 'false' };
 
 describe('demo Vue 3 axios fixture', () => {
   it('verifies the MVP flow against a real fixture project', async () => {
@@ -72,7 +73,7 @@ describe('demo Vue 3 axios fixture', () => {
     const generated = await generateAdapter({ projectRoot: demoRoot });
     expect(generated.packageDir).toBe(join(process.cwd(), 'examples/demo-agent-adapter'));
 
-    await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: generated.packageDir });
-    await execFileAsync('npm', ['run', 'build'], { cwd: generated.packageDir });
+    await execFileAsync('npm', ['install', '--ignore-scripts'], { cwd: generated.packageDir, env: realNpmEnv });
+    await execFileAsync('npm', ['run', 'build'], { cwd: generated.packageDir, env: realNpmEnv });
   });
 });

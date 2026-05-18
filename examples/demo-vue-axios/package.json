@@ -5,7 +5,10 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build"
+    "build": "vue-tsc -b && vite build",
+    "open-web:inspect": "open-web inspect --json",
+    "open-web:generate": "open-web generate",
+    "open-web:build": "open-web build"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -16,5 +19,8 @@
     "vue": "^3.5.13",
     "vue-router": "^5.0.7",
     "vue-tsc": "^2.2.0"
+  },
+  "devDependencies": {
+    "open-web-cli": "file:../.."
   }
 }
