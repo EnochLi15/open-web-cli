@@ -23,21 +23,20 @@ textarea {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 280px minmax(680px, 1fr) 320px;
+  grid-template-columns: 260px minmax(900px, 1fr);
   min-height: 100vh;
 }
 
-.workspace-sidebar,
-.detail-panel {
+.workspace-sidebar {
   min-height: 100vh;
   padding: 20px;
   background: #ffffff;
   border-right: 1px solid #d7dee8;
 }
 
-.detail-panel {
-  border-right: 0;
-  border-left: 1px solid #d7dee8;
+.app-content {
+  min-width: 0;
+  padding: 24px;
 }
 
 .brand-block {
@@ -72,6 +71,10 @@ textarea {
 .login-card {
   display: grid;
   gap: 4px;
+}
+
+.app-nav {
+  border-right: 0;
 }
 
 .login-status,
@@ -118,12 +121,23 @@ textarea {
   font-weight: 800;
 }
 
-.board-surface {
+.page-layout {
   min-width: 0;
-  padding: 24px;
 }
 
-.board-header {
+.board-page {
+  display: grid;
+  grid-template-columns: minmax(680px, 1fr) 320px;
+  gap: 18px;
+  align-items: start;
+}
+
+.single-page {
+  display: grid;
+  gap: 18px;
+}
+
+.page-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -146,6 +160,27 @@ h1 {
 .header-actions {
   display: flex;
   gap: 10px;
+}
+
+.toolbar-row {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 320px) minmax(180px, 240px);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: #ffffff;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+}
+
+.context-panel {
+  display: grid;
+  gap: 18px;
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
 }
 
 .kanban-grid {
@@ -290,4 +325,61 @@ h1 {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
+}
+
+.member-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+.member-card,
+.report-card {
+  border-radius: 8px;
+}
+
+.member-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.member-card-head h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+}
+
+.member-card-head span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+.report-card {
+  display: grid;
+  min-height: 160px;
+  place-items: center;
+  text-align: center;
+}
+
+.report-card strong {
+  color: #475569;
+}
+
+.report-card > span {
+  font-size: 42px;
+  font-weight: 800;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(420px, 1fr);
+  gap: 18px;
+  align-items: start;
 }
