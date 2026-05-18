@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { createContext, Script } from 'node:vm';
 import { promisify } from 'node:util';
@@ -117,6 +119,8 @@ export type AxiosCliCallable = (...args: any[]) => Promise<unknown> | unknown;
 export type AxiosCliDefinition<TInput = unknown, TData = unknown> = {
   call: AxiosCliCallable;
   description?: string;
+  parameters?: OpenWebDocsParameter[];
+  inputExample?: unknown;
   args?: (input: TInput, context: CliExecutionContext) => unknown[];
   summary?: (data: TData, input: TInput) => string | undefined;
   ui?:
@@ -129,10 +133,56 @@ export type AxiosCliMapInput = Record<string, AxiosCliCallable | AxiosCliDefinit
 export type CliMapEntry = {
   id: string;
   description?: string;
+  parameters?: OpenWebDocsParameter[];
+  inputExample?: unknown;
   execute: (input: unknown, context: CliExecutionContext) => Promise<OpenWebResult>;
 };
 
 export type CliMap = Record<string, CliMapEntry>;
+
+export type OpenWebDocsParameter = {
+  name: string;
+  in: 'path' | 'query' | 'body' | 'input';
+  required?: boolean;
+  description?: string;
+};
+
+export type OpenWebDocsCapability = {
+  id: string;
+  description?: string;
+  method?: string;
+  url?: string;
+  uiComponent?: string | null;
+  parameters?: OpenWebDocsParameter[];
+  inputExample?: unknown;
+};
+
+export type OpenWebDocsManifest = {
+  packageName?: string;
+  capabilities: OpenWebDocsCapability[];
+  cards?: Array<{
+    id: string;
+    source: string;
+    capability?: string;
+  }>;
+  auth?: {
+    loginUrl?: string;
+    probeCapability?: string;
+  };
+};
+
+export type OpenWebDocsServerOptions = {
+  host?: string;
+  port?: number;
+  io?: CliIo;
+  execute?: (capabilityId: string, input: unknown) => Promise<unknown>;
+  signal?: AbortSignal;
+};
+
+export type OpenWebDocsServer = {
+  url: string;
+  close: () => Promise<void>;
+};
 
 export type InspectProjectOptions = {
   projectRoot: string;
@@ -241,6 +291,8 @@ export function axios2cli(definitions: AxiosCliMapInput): CliMap {
         {
           id,
           description: normalized.description,
+          parameters: normalized.parameters,
+          inputExample: normalized.inputExample,
           execute: async (input: unknown, context: CliExecutionContext): Promise<OpenWebResult> => {
             try {
               const args = normalized.args ? normalized.args(input, context) : [input];
@@ -273,6 +325,48 @@ export async function runCliMap(
   io: CliIo = DEFAULT_CLI_IO,
 ): Promise<number> {
   const [resourceOrCommand, actionOrFlag, ...rest] = args;
+
+  if (resourceOrCommand === 'docs') {
+    const flags = parseCliMapFlags([actionOrFlag, ...rest].filter((arg): arg is string => Boolean(arg)));
+    const docs = createCliMapDocsManifest(cliMap);
+
+    if (flags.has('json')) {
+      io.stdout(`${JSON.stringify(docs, null, 2)}\n`);
+      return 0;
+    }
+
+    if (flags.has('html')) {
+      io.stdout(createOpenWebDocsHtml(docs));
+      return 0;
+    }
+
+    const server = await serveOpenWebDocs(docs, {
+      host: flags.get('host'),
+      port: flags.has('port') ? Number(flags.get('port')) : undefined,
+      io,
+      execute: (capabilityId, input) => {
+        const entry = cliMap[capabilityId];
+        if (!entry) {
+          return Promise.resolve({
+            ok: false,
+            error: {
+              code: 'CAPABILITY_NOT_FOUND',
+              message: `Unknown capability: ${capabilityId}`,
+              recoverable: false,
+            },
+          } satisfies OpenWebFailure);
+        }
+
+        return entry.execute(input, {
+          capability: capabilityId,
+          argv: args,
+          env: process.env,
+        });
+      },
+    });
+    io.stdout(`Open Web docs available at ${server.url}\n`);
+    await new Promise<never>(() => undefined);
+  }
 
   if (!resourceOrCommand || resourceOrCommand === 'help' || resourceOrCommand === '--help') {
     io.stdout(formatCliMapHelp(cliMap));
@@ -327,6 +421,472 @@ export async function runCliMap(
 
 function normalizeAxiosCliDefinition(definition: AxiosCliCallable | AxiosCliDefinition): AxiosCliDefinition {
   return typeof definition === 'function' ? { call: definition } : definition;
+}
+
+function createCliMapDocsManifest(cliMap: CliMap): OpenWebDocsManifest {
+  return {
+    capabilities: Object.values(cliMap).map((entry) => ({
+      id: entry.id,
+      description: entry.description,
+      parameters: entry.parameters,
+      inputExample: entry.inputExample,
+    })),
+  };
+}
+
+export async function serveOpenWebDocs(
+  docs: OpenWebDocsManifest,
+  options: OpenWebDocsServerOptions = {},
+): Promise<OpenWebDocsServer> {
+  const host = options.host ?? '127.0.0.1';
+  const port = options.port ?? 0;
+  const server = createServer(async (request, response) => {
+    await handleOpenWebDocsRequest(docs, options.execute, request, response);
+  });
+
+  options.signal?.addEventListener('abort', () => {
+    server.close();
+  });
+
+  await new Promise<void>((resolvePromise, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, () => {
+      server.off('error', reject);
+      resolvePromise();
+    });
+  });
+
+  const address = server.address() as AddressInfo;
+  const displayHost = address.address === '0.0.0.0' || address.address === '::' ? '127.0.0.1' : address.address;
+  return {
+    url: `http://${displayHost}:${address.port}`,
+    close: () => closeServer(server),
+  };
+}
+
+async function handleOpenWebDocsRequest(
+  docs: OpenWebDocsManifest,
+  execute: OpenWebDocsServerOptions['execute'],
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+
+  if (request.method === 'GET' && url.pathname === '/') {
+    writeResponse(response, 200, createOpenWebDocsHtml(docs), 'text/html; charset=utf-8');
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/capabilities') {
+    writeJsonResponse(response, 200, docs);
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname.startsWith('/api/demo/')) {
+    const capabilityId = decodeURIComponent(url.pathname.slice('/api/demo/'.length));
+    if (!execute) {
+      writeJsonResponse(response, 501, {
+        ok: false,
+        error: {
+          code: 'CONFIG_ERROR',
+          message: 'No demo executor is configured for this docs server.',
+          recoverable: false,
+        },
+      } satisfies OpenWebFailure);
+      return;
+    }
+
+    try {
+      const input = await readJsonBody(request);
+      const result = await execute(capabilityId, input);
+      writeJsonResponse(response, 200, result);
+    } catch (error) {
+      writeJsonResponse(response, 400, {
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: error instanceof Error ? error.message : String(error),
+          recoverable: true,
+        },
+      } satisfies OpenWebFailure);
+    }
+    return;
+  }
+
+  writeResponse(response, 404, 'Not found\n', 'text/plain; charset=utf-8');
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  const body = Buffer.concat(chunks).toString('utf8').trim();
+  return body ? JSON.parse(body) : {};
+}
+
+function writeJsonResponse(response: ServerResponse, statusCode: number, value: unknown): void {
+  writeResponse(response, statusCode, `${JSON.stringify(value, null, 2)}\n`, 'application/json; charset=utf-8');
+}
+
+function writeResponse(response: ServerResponse, statusCode: number, body: string, contentType: string): void {
+  response.writeHead(statusCode, {
+    'content-type': contentType,
+    'cache-control': 'no-store',
+  });
+  response.end(body);
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolvePromise();
+    });
+  });
+}
+
+export function createOpenWebDocsHtml(docs: OpenWebDocsManifest): string {
+  const capabilities = [...docs.capabilities].sort((left, right) => left.id.localeCompare(right.id));
+  const cards = docs.cards ?? [];
+  const packageName = docs.packageName ?? 'Open Web CLI';
+  const initialCapability = capabilities[0];
+  const docsJson = JSON.stringify({ ...docs, capabilities }).replace(/</g, '\\u003c');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(packageName)} Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #5c667a;
+      --line: #d9deea;
+      --accent: #0f766e;
+      --accent-strong: #115e59;
+      --code: #111827;
+      --chip: #eef7f5;
+      --warn: #8a4b0f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+    }
+    .topbar {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 24px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: end;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 28px; line-height: 1.15; font-weight: 750; }
+    .subtitle { margin-top: 8px; color: var(--muted); font-size: 14px; }
+    .metrics { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .metric {
+      min-width: 112px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #fbfcff;
+    }
+    .metric strong { display: block; font-size: 22px; line-height: 1; }
+    .metric span { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 20px 24px 32px;
+      display: grid;
+      grid-template-columns: 330px minmax(0, 1fr);
+      gap: 18px;
+    }
+    aside, section.panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      min-width: 0;
+    }
+    aside { overflow: hidden; }
+    .search { padding: 12px; border-bottom: 1px solid var(--line); }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--ink);
+      background: #ffffff;
+    }
+    textarea {
+      min-height: 170px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .list { max-height: calc(100vh - 190px); overflow: auto; }
+    .cap-row {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      padding: 12px;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .cap-row:hover, .cap-row.active { background: #f1f8f7; }
+    .method, .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 24px;
+      border-radius: 6px;
+      padding: 3px 7px;
+      color: var(--accent-strong);
+      background: var(--chip);
+      font-size: 11px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+    .cap-id { min-width: 0; font-weight: 650; overflow-wrap: anywhere; }
+    .cap-desc { margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    section.panel { padding: 18px; }
+    .detail-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .detail-id { font-size: 24px; line-height: 1.2; overflow-wrap: anywhere; }
+    .url { margin-top: 10px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .block h3 { font-size: 15px; margin-bottom: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 650; }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--code);
+    }
+    pre {
+      margin: 0;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcff;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .demo-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+    button.primary {
+      border: 1px solid var(--accent-strong);
+      border-radius: 6px;
+      background: var(--accent);
+      color: white;
+      padding: 9px 12px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.secondary {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      padding: 9px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .status { color: var(--muted); font-size: 13px; }
+    .empty { color: var(--muted); padding: 12px 0; }
+    @media (max-width: 860px) {
+      .topbar, main, .grid, .detail-head { grid-template-columns: 1fr; }
+      .metrics { justify-content: flex-start; }
+      .list { max-height: 280px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar">
+      <div>
+        <h1>${escapeHtml(packageName)}</h1>
+        <p class="subtitle">Converted CLI capability explorer and demo console</p>
+      </div>
+      <div class="metrics" aria-label="Conversion summary">
+        <div class="metric"><strong>${capabilities.length}</strong><span>CLI capabilities</span></div>
+        <div class="metric"><strong>${cards.length}</strong><span>UI cards</span></div>
+        <div class="metric"><strong>${docs.auth?.loginUrl ? 1 : 0}</strong><span>Login flows</span></div>
+      </div>
+    </div>
+  </header>
+  <main>
+    <aside>
+      <div class="search"><input id="search" placeholder="Search capabilities" /></div>
+      <div class="list" id="capability-list"></div>
+    </aside>
+    <section class="panel" id="detail"></section>
+  </main>
+  <script id="open-web-docs-data" type="application/json">${docsJson}</script>
+  <script>
+    const docs = JSON.parse(document.getElementById('open-web-docs-data').textContent);
+    const capabilities = docs.capabilities || [];
+    let selectedId = ${JSON.stringify(initialCapability?.id ?? '')};
+
+    const list = document.getElementById('capability-list');
+    const detail = document.getElementById('detail');
+    const search = document.getElementById('search');
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+    }
+
+    function methodLabel(capability) {
+      return capability.method || 'CLI';
+    }
+
+    function cliUsage(capability) {
+      const parts = capability.id.split('.');
+      const command = parts.length > 1 ? parts[0] + ' ' + parts.slice(1).join('.') : capability.id;
+      return 'web-agent ' + command + " --input '" + JSON.stringify(exampleInput(capability)) + "'";
+    }
+
+    function exampleInput(capability) {
+      if (capability.inputExample !== undefined) return capability.inputExample;
+      const input = {};
+      for (const parameter of capability.parameters || []) {
+        input[parameter.name] = parameter.name === 'id' ? 'demo-id' : 'demo-' + parameter.name;
+      }
+      return input;
+    }
+
+    function renderList() {
+      const query = search.value.trim().toLowerCase();
+      const visible = capabilities.filter((capability) => {
+        return !query || capability.id.toLowerCase().includes(query) || String(capability.description || '').toLowerCase().includes(query);
+      });
+      list.innerHTML = visible.map((capability) => {
+        const active = capability.id === selectedId ? ' active' : '';
+        return '<button class="cap-row' + active + '" data-id="' + escapeHtml(capability.id) + '">'
+          + '<span class="method">' + escapeHtml(methodLabel(capability)) + '</span>'
+          + '<span><span class="cap-id">' + escapeHtml(capability.id) + '</span>'
+          + '<span class="cap-desc">' + escapeHtml(capability.description || 'No description') + '</span></span>'
+          + '</button>';
+      }).join('') || '<p class="empty">No capabilities match this search.</p>';
+    }
+
+    function renderDetail() {
+      const capability = capabilities.find((candidate) => candidate.id === selectedId) || capabilities[0];
+      if (!capability) {
+        detail.innerHTML = '<p class="empty">No converted CLI capabilities yet.</p>';
+        return;
+      }
+      selectedId = capability.id;
+      const params = capability.parameters || [];
+      const paramRows = params.map((parameter) => '<tr><td><code>' + escapeHtml(parameter.name) + '</code></td><td>' + escapeHtml(parameter.in) + '</td><td>' + (parameter.required ? 'yes' : 'no') + '</td><td>' + escapeHtml(parameter.description || '') + '</td></tr>').join('');
+      detail.innerHTML = ''
+        + '<div class="detail-head"><div><h2 class="detail-id">' + escapeHtml(capability.id) + '</h2>'
+        + '<p class="subtitle">' + escapeHtml(capability.description || 'No description provided') + '</p>'
+        + (capability.url ? '<p class="url">' + escapeHtml(capability.method || '') + ' ' + escapeHtml(capability.url) + '</p>' : '')
+        + '</div><span class="badge">' + escapeHtml(methodLabel(capability)) + '</span></div>'
+        + '<div class="grid"><div class="block"><h3>Parameters</h3>'
+        + (params.length ? '<table><thead><tr><th>Name</th><th>In</th><th>Required</th><th>Description</th></tr></thead><tbody>' + paramRows + '</tbody></table>' : '<p class="empty">Accepts a free-form JSON input object.</p>')
+        + '</div><div class="block"><h3>CLI Usage</h3><pre>' + escapeHtml(cliUsage(capability)) + '</pre></div></div>'
+        + '<div class="grid"><div class="block"><h3>Demo Input</h3><textarea id="demo-input">' + escapeHtml(JSON.stringify(exampleInput(capability), null, 2)) + '</textarea>'
+        + '<div class="demo-actions"><button class="primary" id="run-demo">Run demo</button><button class="secondary" id="reset-demo">Reset</button><span class="status" id="demo-status"></span></div></div>'
+        + '<div class="block"><h3>Demo Result</h3><pre id="demo-result">No request yet.</pre></div></div>';
+      document.getElementById('run-demo').addEventListener('click', () => runDemo(capability));
+      document.getElementById('reset-demo').addEventListener('click', () => {
+        document.getElementById('demo-input').value = JSON.stringify(exampleInput(capability), null, 2);
+        document.getElementById('demo-result').textContent = 'No request yet.';
+      });
+    }
+
+    async function runDemo(capability) {
+      const status = document.getElementById('demo-status');
+      const result = document.getElementById('demo-result');
+      status.textContent = 'Running...';
+      try {
+        const payload = JSON.parse(document.getElementById('demo-input').value || '{}');
+        const response = await fetch('/api/demo/' + encodeURIComponent(capability.id), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        result.textContent = JSON.stringify(data, null, 2);
+        status.textContent = response.ok ? 'Done' : 'Failed';
+      } catch (error) {
+        result.textContent = String(error);
+        status.textContent = 'Failed';
+      }
+    }
+
+    list.addEventListener('click', (event) => {
+      const row = event.target.closest('[data-id]');
+      if (!row) return;
+      selectedId = row.getAttribute('data-id');
+      renderList();
+      renderDetail();
+    });
+    search.addEventListener('input', renderList);
+    renderList();
+    renderDetail();
+  </script>
+</body>
+</html>
+`;
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      default:
+        return '&#39;';
+    }
+  });
 }
 
 function unwrapAxiosData(response: unknown): unknown {
@@ -418,6 +978,7 @@ function writeCliMapJson(io: CliIo, value: unknown): void {
 function formatCliMapHelp(cliMap: CliMap): string {
   return [
     'Usage:',
+    '  web-agent docs [--port <port>] [--host <host>]',
     '  web-agent list',
     '  web-agent <resource> <action> [--input <json>]',
     '',
@@ -566,6 +1127,8 @@ type AdapterManifest = {
     url: string;
     description?: string;
     uiComponent: string | null;
+    parameters: OpenWebDocsParameter[];
+    inputExample: Record<string, unknown>;
   }>;
   cards: Array<{
     id: string;
@@ -600,10 +1163,45 @@ function buildAdapterManifest(config: OpenWebConfig, report: InspectReport): Ada
         url: atom.url,
         description: capability.description,
         uiComponent: cards.find((card) => card.capability === id)?.id ?? null,
+        parameters: buildCapabilityParameters(atom),
+        inputExample: buildCapabilityInputExample(atom),
       };
     }),
     cards,
   };
+}
+
+function buildCapabilityParameters(atom: AxiosAtom): OpenWebDocsParameter[] {
+  const pathParameters = [...atom.url.matchAll(/\$\{([^}]+)\}/g)].map((match) => ({
+    name: match[1],
+    in: 'path' as const,
+    required: true,
+    description: `Interpolated into ${atom.url}`,
+  }));
+
+  return pathParameters.length > 0
+    ? pathParameters
+    : [
+        {
+          name: atom.method === 'GET' ? 'query' : 'body',
+          in: atom.method === 'GET' ? 'query' : 'body',
+          required: false,
+          description:
+            atom.method === 'GET'
+              ? 'Additional JSON input is sent as query parameters.'
+              : 'Additional JSON input is sent as the request body.',
+        },
+      ];
+}
+
+function buildCapabilityInputExample(atom: AxiosAtom): Record<string, unknown> {
+  const example: Record<string, unknown> = {};
+  for (const parameter of buildCapabilityParameters(atom)) {
+    if (parameter.in === 'path') {
+      example[parameter.name] = parameter.name.toLowerCase() === 'id' ? 'demo-id' : `demo-${parameter.name}`;
+    }
+  }
+  return example;
 }
 
 function buildAdapterFiles(config: OpenWebConfig, manifest: AdapterManifest): Array<[string, string]> {
@@ -617,6 +1215,7 @@ function buildAdapterFiles(config: OpenWebConfig, manifest: AdapterManifest): Ar
     ['src/adapters/vue.ts', generatedVueAdapter()],
     ['src/cards/registry.ts', generatedCardRegistry()],
     ['src/runtime/auth.ts', generatedAuthRuntime()],
+    ['src/runtime/docs.ts', generatedDocsRuntime()],
     ['src/runtime/http.ts', generatedHttpRuntime()],
     ['src/runtime/result.ts', generatedResultRuntime()],
     ['src/runtime/stream.ts', generatedStreamRuntime()],
@@ -648,6 +1247,10 @@ function generatedPackageJson(config: OpenWebConfig): string {
         './vue': {
           types: './dist/adapters/vue.d.ts',
           default: './dist/adapters/vue.js',
+        },
+        './docs': {
+          types: './dist/runtime/docs.d.ts',
+          default: './dist/runtime/docs.js',
         },
       },
       types: './dist/sdk.d.ts',
@@ -859,6 +1462,172 @@ export async function openBrowserLogin(): Promise<string | undefined> {
 `;
 }
 
+function generatedDocsRuntime(): string {
+  return String.raw`import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+export type OpenWebDocsServerOptions = {
+  host?: string;
+  port?: number;
+  execute?: (capabilityId: string, input: unknown) => Promise<unknown>;
+  signal?: AbortSignal;
+};
+
+export type OpenWebDocsServer = {
+  url: string;
+  close: () => Promise<void>;
+};
+
+export async function serveOpenWebDocs(docs: any, options: OpenWebDocsServerOptions = {}): Promise<OpenWebDocsServer> {
+  const host = options.host ?? '127.0.0.1';
+  const port = options.port ?? 0;
+  const server = createServer(async (request, response) => {
+    await handleRequest(docs, options.execute, request, response);
+  });
+
+  options.signal?.addEventListener('abort', () => {
+    server.close();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+
+  const address = server.address() as AddressInfo;
+  const displayHost = address.address === '0.0.0.0' || address.address === '::' ? '127.0.0.1' : address.address;
+  return {
+    url: 'http://' + displayHost + ':' + address.port,
+    close: () => closeServer(server),
+  };
+}
+
+async function handleRequest(
+  docs: any,
+  execute: OpenWebDocsServerOptions['execute'],
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+
+  if (request.method === 'GET' && url.pathname === '/') {
+    writeResponse(response, 200, createOpenWebDocsHtml(docs), 'text/html; charset=utf-8');
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/capabilities') {
+    writeJson(response, 200, docs);
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname.startsWith('/api/demo/')) {
+    if (!execute) {
+      writeJson(response, 501, { ok: false, error: { code: 'CONFIG_ERROR', message: 'No demo executor configured.', recoverable: false } });
+      return;
+    }
+
+    try {
+      const capabilityId = decodeURIComponent(url.pathname.slice('/api/demo/'.length));
+      const input = await readJsonBody(request);
+      writeJson(response, 200, await execute(capabilityId, input));
+    } catch (error) {
+      writeJson(response, 400, {
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: error instanceof Error ? error.message : String(error),
+          recoverable: true,
+        },
+      });
+    }
+    return;
+  }
+
+  writeResponse(response, 404, 'Not found\n', 'text/plain; charset=utf-8');
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const body = Buffer.concat(chunks).toString('utf8').trim();
+  return body ? JSON.parse(body) : {};
+}
+
+function writeJson(response: ServerResponse, statusCode: number, value: unknown): void {
+  writeResponse(response, statusCode, JSON.stringify(value, null, 2) + '\n', 'application/json; charset=utf-8');
+}
+
+function writeResponse(response: ServerResponse, statusCode: number, body: string, contentType: string): void {
+  response.writeHead(statusCode, { 'content-type': contentType, 'cache-control': 'no-store' });
+  response.end(body);
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+export function createOpenWebDocsHtml(docs: any): string {
+  const capabilities = [...(docs.capabilities ?? [])].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  const cards = docs.cards ?? [];
+  const packageName = docs.packageName ?? 'Open Web CLI';
+  const payload = JSON.stringify({ ...docs, capabilities }).replace(/</g, '\\u003c');
+  const initialId = capabilities[0]?.id ?? '';
+
+  return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '<head>',
+    '<meta charset="utf-8" />',
+    '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+    '<title>' + escapeHtml(packageName) + ' Docs</title>',
+    '<style>',
+    ':root{--bg:#f7f8fb;--panel:#fff;--ink:#172033;--muted:#5c667a;--line:#d9deea;--accent:#0f766e;--chip:#eef7f5;--code:#111827}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:0}header{border-bottom:1px solid var(--line);background:#fff}.topbar{max-width:1180px;margin:0 auto;padding:24px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:end}h1,h2,h3,p{margin:0}h1{font-size:28px;line-height:1.15}.subtitle{margin-top:8px;color:var(--muted);font-size:14px}.metrics{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.metric{min-width:112px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fbfcff}.metric strong{display:block;font-size:22px;line-height:1}.metric span{display:block;margin-top:6px;color:var(--muted);font-size:12px}main{max-width:1180px;margin:0 auto;padding:20px 24px 32px;display:grid;grid-template-columns:330px minmax(0,1fr);gap:18px}aside,section.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;min-width:0}aside{overflow:hidden}.search{padding:12px;border-bottom:1px solid var(--line)}input,textarea{width:100%;border:1px solid var(--line);border-radius:6px;padding:10px 12px;font:inherit;color:var(--ink);background:#fff}textarea{min-height:170px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;line-height:1.5}.list{max-height:calc(100vh - 190px);overflow:auto}.cap-row{width:100%;display:grid;grid-template-columns:58px minmax(0,1fr);gap:10px;align-items:center;padding:12px;border:0;border-bottom:1px solid var(--line);background:#fff;color:inherit;text-align:left;cursor:pointer}.cap-row:hover,.cap-row.active{background:#f1f8f7}.method,.badge{display:inline-flex;align-items:center;justify-content:center;min-height:24px;border-radius:6px;padding:3px 7px;color:#115e59;background:var(--chip);font-size:11px;font-weight:750;text-transform:uppercase}.cap-id{min-width:0;font-weight:650;overflow-wrap:anywhere}.cap-desc{margin-top:4px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}section.panel{padding:18px}.detail-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start;padding-bottom:16px;border-bottom:1px solid var(--line)}.detail-id{font-size:24px;line-height:1.2;overflow-wrap:anywhere}.url{margin-top:10px;color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:16px}.block h3{font-size:15px;margin-bottom:10px}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:650}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--code)}pre{margin:0;padding:12px;border:1px solid var(--line);border-radius:6px;background:#fbfcff;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.5}.demo-actions{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}button.primary{border:1px solid #115e59;border-radius:6px;background:var(--accent);color:#fff;padding:9px 12px;font:inherit;font-weight:700;cursor:pointer}button.secondary{border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:9px 12px;font:inherit;cursor:pointer}.status{color:var(--muted);font-size:13px}.empty{color:var(--muted);padding:12px 0}@media(max-width:860px){.topbar,main,.grid,.detail-head{grid-template-columns:1fr}.metrics{justify-content:flex-start}.list{max-height:280px}}',
+    '</style>',
+    '</head>',
+    '<body>',
+    '<header><div class="topbar"><div><h1>' + escapeHtml(packageName) + '</h1><p class="subtitle">Converted CLI capability explorer and demo console</p></div><div class="metrics"><div class="metric"><strong>' + capabilities.length + '</strong><span>CLI capabilities</span></div><div class="metric"><strong>' + cards.length + '</strong><span>UI cards</span></div><div class="metric"><strong>' + (docs.auth?.loginUrl ? 1 : 0) + '</strong><span>Login flows</span></div></div></div></header>',
+    '<main><aside><div class="search"><input id="search" placeholder="Search capabilities" /></div><div class="list" id="capability-list"></div></aside><section class="panel" id="detail"></section></main>',
+    '<script id="open-web-docs-data" type="application/json">' + payload + '</script>',
+    '<script>',
+    'const docs=JSON.parse(document.getElementById("open-web-docs-data").textContent);const capabilities=docs.capabilities||[];let selectedId=' + JSON.stringify(initialId) + ';const list=document.getElementById("capability-list");const detail=document.getElementById("detail");const search=document.getElementById("search");function escapeHtml(value){return String(value??"").replace(/[&<>"]/g,function(char){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[char]}).replaceAll(String.fromCharCode(39),"&#39;")}function methodLabel(capability){return capability.method||"CLI"}function exampleInput(capability){if(capability.inputExample!==undefined)return capability.inputExample;const input={};for(const parameter of capability.parameters||[]){input[parameter.name]=parameter.name==="id"?"demo-id":"demo-"+parameter.name}return input}function cliUsage(capability){const parts=capability.id.split(".");const command=parts.length>1?parts[0]+" "+parts.slice(1).join("."):capability.id;const quote=String.fromCharCode(39);return "web-agent "+command+" --input "+quote+JSON.stringify(exampleInput(capability))+quote}function renderList(){const query=search.value.trim().toLowerCase();const visible=capabilities.filter(function(capability){return !query||capability.id.toLowerCase().includes(query)||String(capability.description||"").toLowerCase().includes(query)});list.innerHTML=visible.map(function(capability){const active=capability.id===selectedId?" active":"";return "<button class=\\"cap-row"+active+"\\" data-id=\\""+escapeHtml(capability.id)+"\\"><span class=\\"method\\">"+escapeHtml(methodLabel(capability))+"</span><span><span class=\\"cap-id\\">"+escapeHtml(capability.id)+"</span><span class=\\"cap-desc\\">"+escapeHtml(capability.description||"No description")+"</span></span></button>"}).join("")||"<p class=\\"empty\\">No capabilities match this search.</p>"}function renderDetail(){const capability=capabilities.find(function(candidate){return candidate.id===selectedId})||capabilities[0];if(!capability){detail.innerHTML="<p class=\\"empty\\">No converted CLI capabilities yet.</p>";return}selectedId=capability.id;const params=capability.parameters||[];const rows=params.map(function(parameter){return "<tr><td><code>"+escapeHtml(parameter.name)+"</code></td><td>"+escapeHtml(parameter.in)+"</td><td>"+(parameter.required?"yes":"no")+"</td><td>"+escapeHtml(parameter.description||"")+"</td></tr>"}).join("");detail.innerHTML="<div class=\\"detail-head\\"><div><h2 class=\\"detail-id\\">"+escapeHtml(capability.id)+"</h2><p class=\\"subtitle\\">"+escapeHtml(capability.description||"No description provided")+"</p>"+(capability.url?"<p class=\\"url\\">"+escapeHtml(capability.method||"")+" "+escapeHtml(capability.url)+"</p>":"")+"</div><span class=\\"badge\\">"+escapeHtml(methodLabel(capability))+"</span></div><div class=\\"grid\\"><div class=\\"block\\"><h3>Parameters</h3>"+(params.length?"<table><thead><tr><th>Name</th><th>In</th><th>Required</th><th>Description</th></tr></thead><tbody>"+rows+"</tbody></table>":"<p class=\\"empty\\">Accepts a free-form JSON input object.</p>")+"</div><div class=\\"block\\"><h3>CLI Usage</h3><pre>"+escapeHtml(cliUsage(capability))+"</pre></div></div><div class=\\"grid\\"><div class=\\"block\\"><h3>Demo Input</h3><textarea id=\\"demo-input\\">"+escapeHtml(JSON.stringify(exampleInput(capability),null,2))+"</textarea><div class=\\"demo-actions\\"><button class=\\"primary\\" id=\\"run-demo\\">Run demo</button><button class=\\"secondary\\" id=\\"reset-demo\\">Reset</button><span class=\\"status\\" id=\\"demo-status\\"></span></div></div><div class=\\"block\\"><h3>Demo Result</h3><pre id=\\"demo-result\\">No request yet.</pre></div></div>";document.getElementById("run-demo").addEventListener("click",function(){runDemo(capability)});document.getElementById("reset-demo").addEventListener("click",function(){document.getElementById("demo-input").value=JSON.stringify(exampleInput(capability),null,2);document.getElementById("demo-result").textContent="No request yet."})}async function runDemo(capability){const status=document.getElementById("demo-status");const result=document.getElementById("demo-result");status.textContent="Running...";try{const payload=JSON.parse(document.getElementById("demo-input").value||"{}");const response=await fetch("/api/demo/"+encodeURIComponent(capability.id),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});const data=await response.json();result.textContent=JSON.stringify(data,null,2);status.textContent=response.ok?"Done":"Failed"}catch(error){result.textContent=String(error);status.textContent="Failed"}}list.addEventListener("click",function(event){const row=event.target.closest("[data-id]");if(!row)return;selectedId=row.getAttribute("data-id");renderList();renderDetail()});search.addEventListener("input",renderList);renderList();renderDetail();',
+    '</script>',
+    '</body>',
+    '</html>',
+  ].join('\n');
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      default:
+        return '&#39;';
+    }
+  });
+}
+`;
+}
+
 function generatedSdk(): string {
   return `import { manifest } from './manifest.js';
 import { callCapability } from './runtime/http.js';
@@ -944,7 +1713,9 @@ function generatedCli(): string {
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { manifest } from './manifest.js';
 import { FileAuthStore, openBrowserLogin, type AuthState } from './runtime/auth.js';
+import { createOpenWebDocsHtml, serveOpenWebDocs } from './runtime/docs.js';
 import { executeCapability } from './sdk.js';
 
 type CliIo = {
@@ -963,6 +1734,32 @@ export async function runCli(args = process.argv.slice(2), io: CliIo = DEFAULT_I
   const rest = action ? commandRest.slice(1) : commandRest;
   const flags = parseFlags(rest);
   const authStore = new FileAuthStore();
+
+  if (command === 'docs') {
+    if (flags.has('json')) {
+      writeJson(io, manifest);
+      return 0;
+    }
+
+    if (flags.has('html')) {
+      io.stdout(createOpenWebDocsHtml(manifest));
+      return 0;
+    }
+
+    const server = await serveOpenWebDocs(manifest, {
+      host: flags.get('host'),
+      port: flags.has('port') ? Number(flags.get('port')) : undefined,
+      execute: async (capabilityId, input) => {
+        const authState = await authStore.get();
+        return executeCapability(capabilityId, input, {
+          baseUrl: process.env.OPEN_WEB_BASE_URL,
+          headers: authState?.headers,
+        });
+      },
+    });
+    io.stdout(\`Open Web docs available at \${server.url}\\n\`);
+    await new Promise<never>(() => undefined);
+  }
 
   if (command === 'login') {
     const authJson = flags.get('auth-json');
@@ -990,7 +1787,7 @@ export async function runCli(args = process.argv.slice(2), io: CliIo = DEFAULT_I
   }
 
   if (!command || !action) {
-    io.stderr('Usage: web-agent login|logout|auth status|<resource> <action>\\n');
+    io.stderr('Usage: web-agent login|logout|auth status|docs|<resource> <action>\\n');
     return 1;
   }
 

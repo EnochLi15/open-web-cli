@@ -30,6 +30,7 @@ The generated package is intended to support:
 import { createSdk } from '@company/web-agent-adapter';
 import { createMastraTools } from '@company/web-agent-adapter/mastra';
 import { cardRegistry } from '@company/web-agent-adapter/vue';
+import { serveOpenWebDocs } from '@company/web-agent-adapter/docs';
 ```
 
 ## Core Ideas
@@ -168,7 +169,7 @@ console.log(result.packageDir);
 The public API exposes both runtime wrapping and generator flows:
 
 ```ts
-import { axios2cli, runCliMap, inspectProject, generateAdapter, buildAdapter } from 'open-web-cli';
+import { axios2cli, runCliMap, serveOpenWebDocs, inspectProject, generateAdapter, buildAdapter } from 'open-web-cli';
 ```
 
 Use `inspectProject` for discovery, `generateAdapter` when another system will install/build the adapter, and `buildAdapter` for the full local conversion.
@@ -187,10 +188,21 @@ Generated adapter CLIs are expected to expose:
 web-agent login
 web-agent auth status
 web-agent logout
+web-agent docs
 web-agent <resource> <action>
 ```
 
 Capability commands output a stable JSON envelope by default so they can be used directly by agents and tool wrappers.
+
+`web-agent docs` starts a local Swagger-like explorer for the converted CLI surface. It shows the total capability count, each command's parameters, HTTP source mapping, CLI usage, linked UI card, and a demo request runner that POSTs to the generated adapter:
+
+```bash
+web-agent docs --port 4317
+web-agent docs --json
+web-agent docs --html
+```
+
+The programmatic `axios2cli` path also includes the same docs base capability through `runCliMap(cliMap, ['docs'])`.
 
 ## Generative UI Result Shape
 

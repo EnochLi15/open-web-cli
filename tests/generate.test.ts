@@ -86,6 +86,7 @@ describe('buildAdapter', () => {
         'src/adapters/vue.ts',
         'src/cards/registry.ts',
         'src/runtime/auth.ts',
+        'src/runtime/docs.ts',
         'src/runtime/http.ts',
         'src/runtime/result.ts',
         'src/runtime/stream.ts',
@@ -175,6 +176,49 @@ describe('buildAdapter', () => {
       },
       summary: 'Auth state saved.',
     });
+
+    const docs = await execFileAsync(process.execPath, [join(packageDir, 'dist/cli.js'), 'docs', '--json']);
+    expect(JSON.parse(docs.stdout)).toMatchObject({
+      packageName: '@demo/agent-adapter',
+      capabilities: expect.arrayContaining([
+        {
+          id: 'user.list',
+          method: 'GET',
+          url: '/users',
+          description: 'List users',
+          uiComponent: 'user-list-card',
+          parameters: [
+            {
+              name: 'query',
+              in: 'query',
+              required: false,
+              description: 'Additional JSON input is sent as query parameters.',
+            },
+          ],
+          inputExample: {},
+        },
+        {
+          id: 'user.updateStatus',
+          method: 'POST',
+          url: '/users/${id}/status',
+          description: 'Update status',
+          uiComponent: null,
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              description: 'Interpolated into /users/${id}/status',
+            },
+          ],
+          inputExample: { id: 'demo-id' },
+        },
+      ]),
+    });
+
+    const docsHtml = await execFileAsync(process.execPath, [join(packageDir, 'dist/cli.js'), 'docs', '--html']);
+    expect(docsHtml.stdout).toContain('Converted CLI capability explorer and demo console');
+    expect(docsHtml.stdout).toContain('user.updateStatus');
 
     const capability = await execFileAsync(process.execPath, [
       join(packageDir, 'dist/cli.js'),

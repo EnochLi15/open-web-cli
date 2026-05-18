@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { axios2cli, runCliMap } from '../src/index.js';
+import { axios2cli, runCliMap, serveOpenWebDocs } from '../src/index.js';
 
 describe('axios2cli', () => {
   it('wraps axios-style functions as agent-friendly CLI capabilities', async () => {
@@ -102,5 +102,56 @@ describe('axios2cli', () => {
         recoverable: false,
       },
     });
+  });
+
+  it('exposes converted CLI docs metadata and demo execution', async () => {
+    const cliMap = axios2cli({
+      'board.listCards': {
+        description: 'List kanban cards',
+        parameters: [{ name: 'status', in: 'query', required: false }],
+        inputExample: { status: 'ready' },
+        call: async () => ({ status: 200, data: [{ id: 'card-1' }] }),
+      },
+    });
+
+    const docsWrites: string[] = [];
+    const docsExit = await runCliMap(cliMap, ['docs', '--json'], {
+      stdout: (text) => docsWrites.push(text),
+      stderr: () => undefined,
+    });
+    expect(docsExit).toBe(0);
+    expect(JSON.parse(docsWrites.join(''))).toEqual({
+      capabilities: [
+        {
+          id: 'board.listCards',
+          description: 'List kanban cards',
+          parameters: [{ name: 'status', in: 'query', required: false }],
+          inputExample: { status: 'ready' },
+        },
+      ],
+    });
+
+    const server = await serveOpenWebDocs(JSON.parse(docsWrites.join('')), {
+      execute: (capabilityId, input) =>
+        cliMap[capabilityId].execute(input, {
+          capability: capabilityId,
+          argv: [],
+          env: {},
+        }),
+    });
+    try {
+      const response = await fetch(`${server.url}/api/demo/board.listCards`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'ready' }),
+      });
+      expect(await response.json()).toEqual({
+        ok: true,
+        capability: 'board.listCards',
+        data: [{ id: 'card-1' }],
+      });
+    } finally {
+      await server.close();
+    }
   });
 });
