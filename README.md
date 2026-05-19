@@ -74,13 +74,78 @@ export default defineOpenWeb({
 Install the generator in a Vue 3 + axios project, then run it from that project directory:
 
 ```bash
-npm install -D open-web-cli
+npm install -D open-web-cli@0.1.0
 open-web inspect --json
 open-web generate
 open-web build
 ```
 
 `open-web` defaults `--project` to the current working directory. Use `--project <path>` when running from another directory, and `--config <path>` when the config file is not named `open-web.config.ts`.
+
+## Quick Convert A Vue App
+
+The fastest path is to treat Open Web CLI like a downstream dependency inside the Vue app you want to convert:
+
+```bash
+cd path/to/vue-axios-app
+npm install -D open-web-cli@0.1.0
+npx open-web inspect --json
+```
+
+Use the inspect output to pick a small first slice:
+
+- Pick 3-8 axios atoms from `src/api/**`, service modules, or typed feature modules.
+- Prefer list/detail/current-user/auth endpoints before multi-step workflows.
+- Pick display-only Vue card candidates with few warnings; pure page sections and table/detail views work best.
+- Create `open-web.config.ts` in the Vue app and allowlist only the chosen capabilities.
+
+Minimal config:
+
+```ts
+import { defineOpenWeb } from 'open-web-cli';
+
+export default defineOpenWeb({
+  output: {
+    packageDir: '../web-agent-adapter',
+    packageName: '@demo/web-agent-adapter',
+  },
+  auth: {
+    loginUrl: 'http://localhost:5173/login',
+    probeCapability: 'user.info',
+  },
+  expose: {
+    capabilities: {
+      'user.info': {
+        from: 'src/api/user.ts#getUserInfo',
+        description: 'Fetch the current user profile.',
+      },
+    },
+  },
+  cards: {
+    'user-profile-card': {
+      source: 'src/views/profile/UserProfile.vue',
+      capability: 'user.info',
+    },
+  },
+});
+```
+
+Build and open the generated CLI explorer:
+
+```bash
+npx open-web build --json
+cd ../web-agent-adapter
+node dist/cli.js docs --port 4317
+```
+
+Then try the generated CLI against a real or mock API:
+
+```bash
+node dist/cli.js login --auth-json '{"headers":{"authorization":"Bearer demo"}}' --json
+OPEN_WEB_BASE_URL=http://127.0.0.1:3000 node dist/cli.js user info --input '{}'
+```
+
+For larger real-world examples, see [examples/github-vue-axios](examples/github-vue-axios). For an agent-ready repeatable workflow, see [docs/skills/vue-axios-to-cli/SKILL.md](docs/skills/vue-axios-to-cli/SKILL.md).
 
 The demo app in `examples/demo-vue-axios` uses the published npm package, the same way a downstream Vue app would:
 
