@@ -1959,11 +1959,12 @@ async function listProjectFiles(projectRoot: string): Promise<string[]> {
 
 function findAxiosAtoms(projectRoot: string, filePath: string, sourceText: string): AxiosAtom[] {
   const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true);
+  const constants = collectStringConstants(sourceFile);
   const atoms: AxiosAtom[] = [];
 
   function visit(node: ts.Node): void {
     if (ts.isFunctionDeclaration(node) && node.name) {
-      collectAtomsFromFunction(projectRoot, filePath, node.name.text, node, atoms);
+      collectAtomsFromFunction(projectRoot, filePath, node.name.text, node, atoms, constants);
     }
 
     if (ts.isVariableStatement(node)) {
@@ -1973,7 +1974,7 @@ function findAxiosAtoms(projectRoot: string, filePath: string, sourceText: strin
           declaration.initializer &&
           (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
         ) {
-          collectAtomsFromFunction(projectRoot, filePath, declaration.name.text, declaration.initializer, atoms);
+          collectAtomsFromFunction(projectRoot, filePath, declaration.name.text, declaration.initializer, atoms, constants);
         }
       }
     }
@@ -1985,15 +1986,41 @@ function findAxiosAtoms(projectRoot: string, filePath: string, sourceText: strin
   return atoms;
 }
 
+function collectStringConstants(sourceFile: ts.SourceFile): Map<string, string> {
+  const constants = new Map<string, string>();
+
+  function visit(node: ts.Node): void {
+    if (ts.isVariableStatement(node)) {
+      const isConst = (node.declarationList.flags & ts.NodeFlags.Const) !== 0;
+      if (isConst) {
+        for (const declaration of node.declarationList.declarations) {
+          if (ts.isIdentifier(declaration.name) && declaration.initializer) {
+            const value = getUrlText(declaration.initializer, constants);
+            if (value !== undefined && !value.includes('${')) {
+              constants.set(declaration.name.text, value);
+            }
+          }
+        }
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return constants;
+}
+
 function collectAtomsFromFunction(
   projectRoot: string,
   filePath: string,
   functionName: string,
   functionNode: ts.Node,
   atoms: AxiosAtom[],
+  constants: Map<string, string>,
 ): void {
   function visit(node: ts.Node): void {
-    const call = getHttpCall(node);
+    const call = getHttpCall(node, constants);
     if (call) {
       atoms.push({
         id: `${resourceNameFromFile(filePath)}.${functionName}`,
@@ -2009,30 +2036,93 @@ function collectAtomsFromFunction(
   visit(functionNode);
 }
 
-function getHttpCall(node: ts.Node): { method: string; url: string } | undefined {
-  if (
-    !ts.isCallExpression(node) ||
-    !ts.isPropertyAccessExpression(node.expression) ||
-    !ts.isIdentifier(node.expression.expression)
-  ) {
+function getHttpCall(node: ts.Node, constants: Map<string, string>): { method: string; url: string } | undefined {
+  if (!ts.isCallExpression(node)) {
     return undefined;
   }
 
-  const method = node.expression.name.text;
-  if (!HTTP_METHODS.has(method)) {
+  if (ts.isPropertyAccessExpression(node.expression)) {
+    const method = node.expression.name.text;
+    if (HTTP_METHODS.has(method)) {
+      const urlArgument = node.arguments[0];
+      const url = getUrlText(urlArgument, constants);
+      if (url) {
+        return { method, url };
+      }
+    }
+  }
+
+  const requestConfig = getRequestConfigHttpCall(node, constants);
+  if (requestConfig) {
+    return requestConfig;
+  }
+
+  return undefined;
+}
+
+function getRequestConfigHttpCall(
+  node: ts.CallExpression,
+  constants: Map<string, string>,
+): { method: string; url: string } | undefined {
+  if (!isLikelyHttpRequestCallee(node.expression)) {
     return undefined;
   }
 
-  const urlArgument = node.arguments[0];
-  const url = getUrlText(urlArgument);
+  const config = node.arguments[0];
+  if (!config || !ts.isObjectLiteralExpression(config)) {
+    return undefined;
+  }
+
+  const url = getObjectLiteralPropertyText(config, 'url', constants);
   if (!url) {
+    return undefined;
+  }
+
+  const method = (getObjectLiteralPropertyText(config, 'method', constants) ?? 'get').toLowerCase();
+  if (!HTTP_METHODS.has(method)) {
     return undefined;
   }
 
   return { method, url };
 }
 
-function getUrlText(node: ts.Expression | undefined): string | undefined {
+function isLikelyHttpRequestCallee(expression: ts.Expression): boolean {
+  if (ts.isIdentifier(expression)) {
+    return /^(axios|request|http|service|client)$/i.test(expression.text);
+  }
+
+  if (ts.isPropertyAccessExpression(expression)) {
+    return isLikelyHttpRequestCallee(expression.name);
+  }
+
+  return false;
+}
+
+function getObjectLiteralPropertyText(
+  objectLiteral: ts.ObjectLiteralExpression,
+  propertyName: string,
+  constants: Map<string, string>,
+): string | undefined {
+  for (const property of objectLiteral.properties) {
+    if (!ts.isPropertyAssignment(property)) {
+      continue;
+    }
+
+    const name = property.name;
+    const matches =
+      (ts.isIdentifier(name) && name.text === propertyName) ||
+      (ts.isStringLiteralLike(name) && name.text === propertyName);
+    if (!matches) {
+      continue;
+    }
+
+    return getUrlText(property.initializer, constants);
+  }
+
+  return undefined;
+}
+
+function getUrlText(node: ts.Expression | undefined, constants: Map<string, string> = new Map()): string | undefined {
   if (!node) {
     return undefined;
   }
@@ -2046,10 +2136,38 @@ function getUrlText(node: ts.Expression | undefined): string | undefined {
   }
 
   if (ts.isTemplateExpression(node)) {
-    return node.head.text + node.templateSpans.map((span) => `\${${span.expression.getText()}}${span.literal.text}`).join('');
+    return (
+      node.head.text +
+      node.templateSpans
+        .map((span) => {
+          const value = getInterpolatedText(span.expression, constants);
+          return `${value}${span.literal.text}`;
+        })
+        .join('')
+    );
+  }
+
+  if (ts.isIdentifier(node)) {
+    return constants.get(node.text);
+  }
+
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = getUrlText(node.left, constants) ?? getInterpolatedText(node.left, constants);
+    const right = getUrlText(node.right, constants) ?? getInterpolatedText(node.right, constants);
+    if (left !== undefined && right !== undefined) {
+      return `${left}${right}`;
+    }
   }
 
   return undefined;
+}
+
+function getInterpolatedText(node: ts.Expression, constants: Map<string, string>): string {
+  if (ts.isIdentifier(node)) {
+    return constants.get(node.text) ?? `\${${node.text}}`;
+  }
+
+  return `\${${node.getText()}}`;
 }
 
 function findCardCandidate(projectRoot: string, filePath: string, sourceText: string): CardCandidate {

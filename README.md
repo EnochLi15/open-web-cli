@@ -82,10 +82,9 @@ open-web build
 
 `open-web` defaults `--project` to the current working directory. Use `--project <path>` when running from another directory, and `--config <path>` when the config file is not named `open-web.config.ts`.
 
-The demo app in `examples/demo-vue-axios` references this package locally while developing:
+The demo app in `examples/demo-vue-axios` uses the published npm package, the same way a downstream Vue app would:
 
 ```bash
-npm run build
 cd examples/demo-vue-axios
 npm install
 npm run open-web:inspect
